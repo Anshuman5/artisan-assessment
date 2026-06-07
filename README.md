@@ -50,12 +50,19 @@ outbound-iq/
 ```bash
 cd backend
 python -m venv .venv && source .venv/bin/activate
-pip install fastapi uvicorn httpx trafilatura anthropic
+pip install -r requirements.txt
 
-export ANTHROPIC_API_KEY=sk-ant-...
+# Set your API key in a local env file (loaded automatically on startup):
+cp local.env.example local.env
+# then edit local.env and set ANTHROPIC_API_KEY=sk-ant-...
 
 uvicorn server:app --host 0.0.0.0 --port 8000
 ```
+
+The backend reads `backend/local.env` on startup (via `python-dotenv`), so you
+don't need to `export` anything in your shell. `local.env` is gitignored — keep
+your real key there. Any real environment variables (e.g. those set on Railway)
+take precedence over `local.env`.
 
 The API runs at `http://localhost:8000`. A `data.db` SQLite file is created automatically on first run.
 
@@ -88,5 +95,6 @@ When built, the backend serves the frontend at the root path, so visiting `http:
 | GET    | `/api/health`             | Health check                                 |
 
 ## Notes
-- The SQLite database (`data.db`), `node_modules/`, and build output (`dist/`) are gitignored.
+- Secrets live in `backend/local.env` (gitignored); commit only `local.env.example`.
+- The SQLite database (`data.db`), `node_modules/`, build output (`dist/`), and `.venv/` are gitignored.
 - Email drafts avoid placeholder tokens — claims are populated from real retrieved evidence.

@@ -1,6 +1,22 @@
-node_modules/
+# Python
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# Secrets / local env
+local.env
+*.env
+.env
+!local.env.example
+
+# Database
 data.db
+
+# Node / frontend build
+node_modules/
 dist/
+
+# Misc / scratch
 test_search.py
+.DS_Store

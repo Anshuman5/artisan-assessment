@@ -26,12 +26,20 @@ from retrieval import (
 )
 
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load local environment variables (ANTHROPIC_API_KEY, model overrides, etc.)
+# from backend/local.env so the key doesn't have to be exported in the shell.
+# Real environment variables (e.g. set on Railway) take precedence.
+load_dotenv(Path(__file__).parent / "local.env")
 
 # Model IDs are environment-driven so the same code runs in the sandbox
 # (alias names routed through the website proxy) and on a real Anthropic key
 # (e.g. on Railway, where you set real Anthropic model IDs as env vars).
-CHEAP_MODEL = os.environ.get("CHEAP_MODEL", "claude_haiku_4_5")
-STRONG_MODEL = os.environ.get("STRONG_MODEL", "claude_sonnet_4_6")
+CHEAP_MODEL = os.environ.get("CHEAP_MODEL", "claude-haiku-4-5")
+STRONG_MODEL = os.environ.get("STRONG_MODEL", "claude-sonnet-4-6")
 
 # Optional custom base URL (sandbox proxy). On Railway leave unset to hit
 # Anthropic directly with ANTHROPIC_API_KEY.
