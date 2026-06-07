@@ -25,10 +25,18 @@ from retrieval import (
     company_name_guess,
 )
 
-CHEAP_MODEL = "claude_haiku_4_5"
-STRONG_MODEL = "claude_sonnet_4_6"
+import os
 
-_client = Anthropic()
+# Model IDs are environment-driven so the same code runs in the sandbox
+# (alias names routed through the website proxy) and on a real Anthropic key
+# (e.g. on Railway, where you set real Anthropic model IDs as env vars).
+CHEAP_MODEL = os.environ.get("CHEAP_MODEL", "claude_haiku_4_5")
+STRONG_MODEL = os.environ.get("STRONG_MODEL", "claude_sonnet_4_6")
+
+# Optional custom base URL (sandbox proxy). On Railway leave unset to hit
+# Anthropic directly with ANTHROPIC_API_KEY.
+_base_url = os.environ.get("ANTHROPIC_BASE_URL")
+_client = Anthropic(base_url=_base_url) if _base_url else Anthropic()
 
 
 # ---------------------------------------------------------------------------

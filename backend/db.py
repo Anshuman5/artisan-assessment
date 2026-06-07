@@ -1,11 +1,13 @@
 """SQLite persistence for sender profiles and target evaluations."""
 import json
+import os
 import sqlite3
 import time
 import uuid
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data.db"
+# DB_PATH can point at a persistent volume (e.g. Railway volume mount) via env.
+DB_PATH = Path(os.environ.get("DB_PATH", Path(__file__).parent / "data.db"))
 
 
 def _conn():

@@ -1,7 +1,21 @@
-// __PORT_8000__ is replaced with the proxy path at deploy time. During local
-// dev it stays literal, so we fall back to localhost:8000.
+// Resolve the API base URL.
+//  - In production (Railway), frontend + backend share an origin → use relative
+//    paths (empty base). This is the default.
+//  - VITE_API_BASE can override (e.g. point at a separately hosted backend).
+//  - __PORT_8000__ is replaced with the proxy path on the Perplexity preview deploy.
+//  - Otherwise (local dev) fall back to localhost:8000.
 const PORT_TOKEN = '__PORT_8000__';
-const BASE = PORT_TOKEN.startsWith('__') ? 'http://localhost:8000' : PORT_TOKEN;
+const ENV_BASE = import.meta.env.VITE_API_BASE;
+let BASE;
+if (ENV_BASE !== undefined && ENV_BASE !== '') {
+  BASE = ENV_BASE;
+} else if (!PORT_TOKEN.startsWith('__')) {
+  BASE = PORT_TOKEN;
+} else if (import.meta.env.PROD) {
+  BASE = ''; // same-origin (Railway)
+} else {
+  BASE = 'http://localhost:8000';
+}
 
 async function req(path, opts = {}) {
   const res = await fetch(BASE + path, {
