@@ -46,7 +46,7 @@ export default function App() {
 
 function Header({ tab, setTab, hasSender }) {
   return (
-    <header className="sticky top-0 z-20 border-b backdrop-blur" style={{ borderColor: 'var(--border)', background: 'rgba(10,11,16,.7)' }}>
+    <header className="sticky top-0 z-20 border-b backdrop-blur" style={{ borderColor: 'var(--border)', background: 'rgba(255,255,255,.8)' }}>
       <div className="max-w-6xl mx-auto px-5 h-16 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           <Logo />
@@ -69,7 +69,7 @@ function TabBtn({ active, onClick, n, label, dim }) {
     <button onClick={onClick} data-testid={`tab-${n}`}
       className="px-3.5 py-1.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all"
       style={active
-        ? { background: 'var(--accent-soft)', color: '#cfc8ff', border: '1px solid rgba(124,108,255,.3)' }
+        ? { background: 'var(--accent)', color: '#ffffff', border: '1px solid var(--accent)' }
         : { color: dim ? 'var(--text-faint)' : 'var(--text-dim)', border: '1px solid transparent' }}>
       <span className="mono text-[11px] opacity-70">{n}</span>{label}
     </button>
@@ -144,8 +144,8 @@ function AgentProgress({ steps, step }) {
       {steps.map((s, i) => (
         <div key={i} className="flex items-center gap-3 text-sm">
           <span className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] mono"
-            style={i < step ? { background: 'var(--good)', color: '#062' }
-              : i === step ? { background: 'var(--accent-soft)', color: '#cfc8ff', border: '1px solid var(--accent)' }
+            style={i < step ? { background: 'var(--good)', color: '#ffffff' }
+              : i === step ? { background: 'var(--accent-soft)', color: 'var(--accent)', border: '1px solid var(--accent)' }
                 : { background: 'var(--surface-2)', color: 'var(--text-faint)', border: '1px solid var(--border)' }}>
             {i < step ? '✓' : i + 1}
           </span>
@@ -389,8 +389,8 @@ function TargetResult({ result, onEvidence }) {
 
 function EmailCard({ em, pill }) {
   const angleStyle = em.angle === 'pain-led'
-    ? { color: '#fca5a5', bg: 'rgba(248,113,113,.1)', border: 'rgba(248,113,113,.3)' }
-    : { color: '#7dd3fc', bg: 'rgba(76,201,240,.1)', border: 'rgba(76,201,240,.3)' };
+    ? { color: '#dc2626', bg: 'rgba(220,38,38,.08)', border: 'rgba(220,38,38,.25)' }
+    : { color: '#2563eb', bg: 'rgba(37,99,235,.08)', border: 'rgba(37,99,235,.25)' };
   const full = `Subject: ${em.subject}\n\n${em.body}`;
   return (
     <div className="card p-5 fade-in flex flex-col">
@@ -450,7 +450,7 @@ function ClaimMap({ rows, onEvidence }) {
             <div key={i} className="grid grid-cols-[80px_1fr_auto] gap-3 items-start py-2 border-b last:border-0 text-sm"
               style={{ borderColor: 'var(--border-soft)' }}>
               <span className="chip text-[10px] px-1.5 py-0.5 uppercase tracking-wide text-center"
-                style={r.angle === 'pain-led' ? { color: '#fca5a5' } : { color: '#7dd3fc' }}>{r.angle}</span>
+                style={r.angle === 'pain-led' ? { color: '#dc2626' } : { color: '#2563eb' }}>{r.angle}</span>
               <span className="flex-1">{r.claim}</span>
               <div className="text-right flex flex-col items-end gap-1">
                 <span className="text-[11px] mono" style={{ color: sm.color }}>{sm.label}</span>

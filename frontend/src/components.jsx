@@ -9,11 +9,11 @@ export function Logo({ size = 28 }) {
       <path d="M8 22a6 6 0 0 1 6-6" stroke="url(#g)" strokeWidth="2" strokeLinecap="round" opacity="0.85" />
       <path d="M8 22l9-9" stroke="url(#g)" strokeWidth="2.2" strokeLinecap="round" />
       <path d="M17 13h5v5" stroke="url(#g)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="8" cy="22" r="2" fill="#7c6cff" />
+      <circle cx="8" cy="22" r="2" fill="#111827" />
       <defs>
         <linearGradient id="g" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#7c6cff" />
-          <stop offset="1" stopColor="#4cc9f0" />
+          <stop stopColor="#111827" />
+          <stop offset="1" stopColor="#475569" />
         </linearGradient>
       </defs>
     </svg>

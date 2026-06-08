@@ -3,20 +3,20 @@
 @tailwind utilities;
 
 :root {
-  --bg: #0a0b10;
-  --surface: #12141c;
-  --surface-2: #181b25;
-  --border: #262a38;
-  --border-soft: #1e212c;
-  --text: #e8eaf0;
-  --text-dim: #9aa0b4;
-  --text-faint: #646b80;
-  --accent: #7c6cff;
-  --accent-2: #4cc9f0;
-  --accent-soft: rgba(124, 108, 255, 0.12);
-  --good: #34d399;
-  --warn: #fbbf24;
-  --bad: #f87171;
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-2: #f3f4f6;
+  --border: #e5e7eb;
+  --border-soft: #eef0f2;
+  --text: #0f172a;
+  --text-dim: #5b667a;
+  --text-faint: #97a1b2;
+  --accent: #111827;            /* near-black navy — primary actions / active state */
+  --accent-2: #475569;          /* slate */
+  --accent-soft: rgba(17, 24, 39, 0.06);
+  --good: #16a34a;
+  --warn: #d97706;
+  --bad: #dc2626;
 }
 
 * { box-sizing: border-box; }
@@ -33,14 +33,14 @@ body {
   font-feature-settings: 'cv11', 'ss01';
 }
 
-/* ambient gradient field */
+/* very subtle ambient tint — keeps the page from feeling flat without adding color */
 body::before {
   content: '';
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(900px 500px at 12% -8%, rgba(124, 108, 255, 0.10), transparent 60%),
-    radial-gradient(800px 500px at 100% 0%, rgba(76, 201, 240, 0.07), transparent 55%);
+    radial-gradient(900px 500px at 12% -8%, rgba(15, 23, 42, 0.03), transparent 60%),
+    radial-gradient(800px 500px at 100% 0%, rgba(71, 85, 105, 0.03), transparent 55%);
   pointer-events: none;
   z-index: 0;
 }
@@ -49,8 +49,8 @@ body::before {
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; border: 2px solid var(--bg); }
-::-webkit-scrollbar-thumb:hover { background: #333848; }
+::-webkit-scrollbar-thumb { background: #d8dce3; border-radius: 8px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: #c2c8d2; }
 
 .mono { font-family: 'JetBrains Mono', monospace; }
 
@@ -58,10 +58,11 @@ body::before {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
 }
 
 .field {
-  background: var(--surface-2);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
   color: var(--text);
@@ -75,26 +76,26 @@ body::before {
 .field::placeholder { color: var(--text-faint); }
 
 .btn-primary {
-  background: linear-gradient(135deg, #7c6cff, #6354ff);
-  color: white;
+  background: var(--accent);
+  color: #ffffff;
   border-radius: 10px;
   font-weight: 600;
-  transition: transform .12s ease, box-shadow .15s ease, opacity .15s ease;
-  box-shadow: 0 6px 20px -6px rgba(124, 108, 255, .5);
+  transition: transform .12s ease, box-shadow .15s ease, opacity .15s ease, background .15s ease;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .08), 0 1px 3px rgba(16, 24, 40, .1);
 }
-.btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 28px -8px rgba(124, 108, 255, .6); }
+.btn-primary:hover:not(:disabled) { background: #1f2937; transform: translateY(-1px); box-shadow: 0 4px 12px -4px rgba(16, 24, 40, .25); }
 .btn-primary:active:not(:disabled) { transform: translateY(0); }
 .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
 
 .btn-ghost {
-  background: var(--surface-2);
+  background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text-dim);
   border-radius: 10px;
   font-weight: 500;
   transition: all .15s ease;
 }
-.btn-ghost:hover { color: var(--text); border-color: #343a4c; background: #1c1f2a; }
+.btn-ghost:hover { color: var(--text); border-color: #d1d5db; background: var(--surface-2); }
 
 .chip {
   background: var(--surface-2);
@@ -118,7 +119,7 @@ body::before {
 
 /* progress shimmer */
 .shimmer {
-  background: linear-gradient(90deg, var(--surface-2) 0%, #20232f 50%, var(--surface-2) 100%);
+  background: linear-gradient(90deg, var(--surface-2) 0%, #e9ebef 50%, var(--surface-2) 100%);
   background-size: 200% 100%;
   animation: shimmer 1.3s ease-in-out infinite;
 }
@@ -127,15 +128,15 @@ body::before {
 .evidence-pill {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
-  background: var(--accent-soft);
-  color: #b3a9ff;
-  border: 1px solid rgba(124,108,255,.25);
+  background: rgba(17, 24, 39, 0.05);
+  color: #334155;
+  border: 1px solid rgba(17, 24, 39, 0.12);
   border-radius: 6px;
   padding: 1px 6px;
   cursor: pointer;
   transition: all .12s ease;
 }
-.evidence-pill:hover { background: rgba(124,108,255,.22); color: #d4cdff; }
+.evidence-pill:hover { background: rgba(17, 24, 39, 0.09); color: #0f172a; }
 
 .gridlines {
   background-image: linear-gradient(var(--border-soft) 1px, transparent 1px),
