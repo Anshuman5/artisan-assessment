@@ -106,7 +106,7 @@ function SenderMode({ senders, onSaved, activeSender, setActiveSender, goTargets
 
   return (
     <div className="grid gap-6">
-      <div className="card p-6 gridlines fade-in">
+      <div className="card p-6 fade-in">
         <h1 className="text-xl font-bold mb-1">Infer a company's ICP & value proposition</h1>
         <p className="text-sm mb-5" style={{ color: 'var(--text-dim)' }}>
           Enter a sender company's website. The agent fetches its public pages, extracts evidence snippets, and infers a grounded value prop and ICP.
@@ -287,7 +287,7 @@ function TargetMode({ senders, activeSender, setActiveSender, onEvidence }) {
 
   return (
     <div className="grid gap-6">
-      <div className="card p-6 gridlines fade-in">
+      <div className="card p-6 fade-in">
         <h1 className="text-xl font-bold mb-1">Evaluate a target & draft outbound</h1>
         <p className="text-sm mb-5" style={{ color: 'var(--text-dim)' }}>
           The agent researches the target with live web sources, scores fit against the sender's ICP, and writes two evidence-backed emails.
