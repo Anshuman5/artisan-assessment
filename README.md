@@ -38,10 +38,12 @@ outbound-iq/
 **Mode 2 agent graph**
 
 ```
-crawl ─▶ embed + dedupe ─▶ facet retrieval ─▶ signal extraction (web search)
-      ─▶ ICP fit scoring ─▶ messaging strategy (allowed-claims gate)
-      ─▶ email drafting ─▶ claim verification (entailment) ─▶ constraint check
-      ─▶ corrective redraft (≤1) ─▶ claim map
+crawl ─▶ embed + dedupe (optional → keyword mode in prod)
+      ─▶ signal extraction (web search) ─▶ facet retrieval ─▶ ICP fit scoring
+      ─▶ messaging strategy (allowed-claims gate) ─▶ email drafting
+      ─▶ claim verification (entailment) + constraint check
+      ─▶ if any unsupported claim / out-of-spec: corrective redraft ─▶ re-verify (≤1 round)
+      ─▶ claim map
 ```
 
 **Design highlights**

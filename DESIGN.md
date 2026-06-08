@@ -94,20 +94,38 @@ crawl homepage → discover & fetch priority pages (parallel) → chunk
 ### Mode 2 — Target evaluation + drafting (`evaluate_target`)
 
 ```
-crawl target site → (optional) embed + dedupe
-   → [cheap + web_search]  mine live signals
-   → facet retrieval driven by the sender's ICP + the persona
-   → [strong]  score ICP fit across 5 dimensions
-   → [cheap]   messaging strategy: angles + ALLOWED-claims whitelist (+ off-limits list)
-   → [strong]  draft 2 emails (pain-led, trigger-led), constrained to allowed claims
-   → [cheap]   verify every claim's entailment against its cited snippet
-   → constraint check (length / subject / placeholders)
-   → [strong]  one corrective redraft if anything is unsupported or out of spec
-   → build claim map (with per-claim status) → persist (+ token usage)
+START
+  → crawl                 homepage + priority pages (parallel)
+  → embed + dedupe        optional; no-op → keyword mode in prod  [inside crawl/finalize]
+  → signals               web_search · cheap model
+  → retrieve              facet retrieval from ICP + persona; semantic OR keyword
+  → build evidence map    page snippets + signals (urls act as citation ids)
+  → match / fit score     strong · 5 dimensions (incl. buyer/persona fit)
+  → strategy              cheap · angles + ALLOWED-claims whitelist (+ off-limits list)
+  → draft                 strong · 2 emails (pain-led, trigger-led), allowed claims only
+  → verify                cheap · per-claim entailment vs cited snippet
+                          + constraint check (body 80–130w · subject ≤7w · no placeholders)
+        │
+        ├─ no problems ─────────────────────────► claim map → persist → END
+        │
+        └─ unsupported claim OR out-of-spec? ──►  repair (strong redraft)
+                                                  → re-verify  (loop, ≤1 round)
+                                                  → claim map → persist → END
 ```
 
+Notes that the linear arrows hide:
+- **`signals` precedes `retrieve`** in code (they're independent; signals only needs the
+  name/domain, retrieval is driven by the ICP + persona).
+- **`embed` is optional** — it runs only when `numpy`/`fastembed` are present (local); in the
+  default deploy it's a no-op and `retrieve` uses keyword ranking.
+- The repair gate fires on **an unsupported claim *or* a constraint violation**, not just
+  grounding; verdicts are 3-way (`supported` / `partial` / `unsupported`, where `partial`
+  still counts as grounded).
+- **Repair re-verifies** before finalizing — it's a real loop, capped at `max_rounds=1`; any
+  residual issues are reported in the `verification` summary rather than looped forever.
+
 The key agentic properties: **tool use** (live `web_search`), a **plan-before-draft gate**
-(the strategist whitelists claims), and a **self-correction loop** (verifier → redraft).
+(the strategist whitelists claims), and a **self-correction loop** (verify → repair → re-verify).
 
 ---
 
