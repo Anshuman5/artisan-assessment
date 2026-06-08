@@ -3,7 +3,8 @@
 # both the API and the built frontend (frontend/dist) from one origin.
 
 [phases.setup]
-nixPkgs = ["python311", "nodejs_20", "gcc"]
+# Pure-Python deploy (no numpy/onnxruntime), so no C++ runtime libs needed.
+nixPkgs = ["python311", "nodejs_20"]
 
 [phases.install]
 cmds = [

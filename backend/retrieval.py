@@ -15,14 +15,21 @@ from dataclasses import dataclass, field, asdict
 from urllib.parse import urljoin, urlparse
 
 import httpx
-import numpy as np
 import trafilatura
 import tldextract
 
+# numpy is optional: it's only needed for local embeddings. On lean deploys
+# (e.g. Railway) where the native C++ runtime for numpy/onnxruntime isn't
+# available, we skip it entirely and fall back to keyword retrieval.
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - exercised only on lean deploys
+    np = None
+
 # ---------------------------------------------------------------------------
 # Embeddings (local, no API key). Loaded lazily so importing this module is cheap
-# and so the app still runs (falling back to keyword ranking) if the model or its
-# weights are unavailable.
+# and so the app still runs (falling back to keyword ranking) if numpy, the model,
+# or its weights are unavailable.
 # ---------------------------------------------------------------------------
 EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 _embedder = None
@@ -33,6 +40,9 @@ def _get_embedder():
     global _embedder, _embedder_failed
     if _embedder is not None or _embedder_failed:
         return _embedder
+    if np is None:  # no numpy → no embeddings; use keyword retrieval
+        _embedder_failed = True
+        return None
     try:
         from fastembed import TextEmbedding
         _embedder = TextEmbedding(EMBED_MODEL_NAME)

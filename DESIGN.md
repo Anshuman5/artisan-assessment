@@ -24,7 +24,7 @@ Turn **public company information** into **outbound strategy**. Two modes:
 
 | Requirement | Design response |
 |---|---|
-| Answers/emails must be based on **retrieved snippets, not full-context stuffing** | A RAG layer chunks fetched pages, **embeds them locally**, prunes near-duplicate boilerplate, and retrieves only the snippets **semantically closest to each reasoning facet**. Every claim must cite a snippet id, and each claim is **verified for entailment** against that snippet before it ships. |
+| Answers/emails must be based on **retrieved snippets, not full-context stuffing** | A RAG layer chunks fetched pages and retrieves only the snippets relevant to each reasoning facet via a **pluggable retriever** — local embeddings when available, keyword ranking otherwise. Every claim must cite a snippet id, and each claim is **verified for entailment** against that snippet before it ships. |
 | Implement an **agentic** solution that *plans → retrieves evidence → finds signals → drafts* | A multi-step agent graph where each node is a discrete, single-responsibility LLM call: research → signal mining (tool use) → ICP fit → messaging strategy → drafting → claim verification → corrective redraft. |
 | **Optimize for token usage and quality** | Two-tier model routing (cheap for mining/strategy/verification, strong for synthesis/drafting), semantic retrieval with hard snippet caps, dedup, small structured prompts, `max_tokens` budgets, and **per-step token metering surfaced in the UI** so the optimization is measurable. |
 
@@ -53,15 +53,20 @@ Turn **public company information** into **outbound strategy**. Two modes:
 │   │  dedupe · semantic search│   │                              │ │
 │   └──────────────────────────┘   └──────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────────┘
-        │ httpx (own pages)   │ Anthropic API (LLM + web_search)   │ fastembed (local, no key)
+        │ httpx (own pages)   │ Anthropic API (LLM + web_search)   │ fastembed (optional, local, no key)
         ▼                     ▼                                     ▼
    Company websites      Claude models / live web            bge-small embeddings
 ```
 
+> **Retrieval is pluggable.** Embeddings are an *optional* enhancement: when `numpy` +
+> `fastembed` are installed (local dev) the retriever uses semantic search; on lean deploys
+> (e.g. Railway) those native deps are omitted and the **same retrieval interface** falls back
+> to keyword ranking. The application code is identical either way — see §4.1.
+
 **Separation of concerns** is the organizing principle:
 
-- `retrieval.py` knows nothing about LLMs — it fetches, extracts, chunks, **embeds**,
-  dedupes, stores, and **semantically retrieves** evidence.
+- `retrieval.py` knows nothing about LLMs — it fetches, extracts, chunks, optionally **embeds**,
+  dedupes, stores, and **retrieves** evidence (semantic or keyword) behind one interface.
 - `agent.py` knows nothing about HTTP or SQL — it orchestrates the agent graph over evidence.
 - `server.py` is a thin transport + persistence boundary; `db.py` is pure persistence.
 
@@ -80,7 +85,7 @@ its own output** — rather than one prompt that does everything.
 
 ```
 crawl homepage → discover & fetch priority pages (parallel) → chunk
-   → embed all snippets once + prune near-duplicates
+   → (if embeddings available) embed all snippets once + prune near-duplicates
    → facet retrieval (7 ICP-dimension queries) → top ~24 snippets
    → synthesize value prop + structured ICP (1 strong-model call, JSON-schema forced)
    → resolve cited ids → evidence map → persist (+ token usage)
@@ -89,7 +94,7 @@ crawl homepage → discover & fetch priority pages (parallel) → chunk
 ### Mode 2 — Target evaluation + drafting (`evaluate_target`)
 
 ```
-crawl target site → embed + dedupe
+crawl target site → (optional) embed + dedupe
    → [cheap + web_search]  mine live signals
    → facet retrieval driven by the sender's ICP + the persona
    → [strong]  score ICP fit across 5 dimensions
@@ -108,36 +113,47 @@ The key agentic properties: **tool use** (live `web_search`), a **plan-before-dr
 
 ## 4. Key design decisions & trade-offs
 
-### 4.1 Semantic RAG with local embeddings, not context stuffing
+### 4.1 Pluggable RAG (semantic when available, keyword otherwise), not context stuffing
 
-**Decision.** Chunk every fetched page, embed all chunks **locally** with
-`BAAI/bge-small-en-v1.5` via `fastembed`, prune near-duplicates by cosine similarity, and
-retrieve only the snippets **semantically closest to each reasoning facet** (industries,
-personas, pains, triggers, persona-fit…). Feed the model a small numbered subset and require
-snippet-id citations.
+**Decision.** Chunk every fetched page and retrieve only the snippets relevant to each
+reasoning facet (industries, personas, pains, triggers, persona-fit…) behind a **single
+retrieval interface** with two interchangeable backends:
+- **Semantic** (preferred, local dev): embed all chunks with `BAAI/bge-small-en-v1.5` via
+  `fastembed`, prune near-duplicates by cosine similarity, and retrieve by cosine to each
+  facet query.
+- **Keyword** (fallback / production default): term-frequency ranking over the same chunks.
+
+Either way, the model gets a small numbered subset and must cite snippet ids.
 
 **Why.**
 - **Token cost.** A company site is tens of thousands of tokens; facet retrieval caps each
-  reasoning call to ~18–24 short snippets.
+  reasoning call to ~18–24 short snippets regardless of backend.
 - **Relevance & quality.** Semantic retrieval surfaces the right evidence even when wording
-  differs from the query (vs. lexical keyword matching), and per-facet queries guarantee
-  *coverage* of every ICP dimension rather than just the top keyword hits.
+  differs from the query; per-facet queries guarantee *coverage* of every ICP dimension rather
+  than just the top keyword hits.
 - **Grounding.** A finite, cited snippet set makes hallucination structurally harder and
   yields the claim map for free.
 
-**Why *local* embeddings.** No second API key, no per-token embedding cost, no data leaving
-the box for retrieval, and deterministic. The price is a one-time ~130 MB model download and
-some CPU. If the model can't load, the store **falls back to keyword ranking** — the app
-still works, just less precisely.
+**Why make embeddings optional (graceful degradation).** Local embeddings need native wheels
+(`numpy`, and `onnxruntime` via `fastembed`) plus a one-time ~130 MB model download and CPU/
+memory at runtime. On a constrained PaaS (Railway/Nixpacks) those native libs are painful
+(missing `libstdc++.so.6`) and the model download/memory can OOM a small instance. So the
+deploy ships **pure-Python with keyword retrieval**, and embeddings are a one-line opt-in
+(`pip install numpy fastembed`) for local use. The retriever auto-detects: if `numpy`/the model
+can't load, `semantic_search` transparently calls the keyword ranker. **The same code path
+runs both ways** — semantic locally, keyword in production — with no branching at the call
+sites.
 
-**Trade-off.** Embedding adds CPU latency and a heavy dependency (`fastembed`, `numpy`).
-Accepted because retrieval quality is central to the brief; the lazy-load + keyword fallback
-keeps it robust.
+**Trade-off.** Production retrieval is lexical (less precise on paraphrase) than local. Accepted
+deliberately: a deploy that *always boots* beats a semantically-richer one that crashes on
+native libs, and the facet-query design keeps keyword coverage reasonable. Restoring semantic
+parity in production is just installing the extras on a base image that has the C++ runtime.
 
-### 4.2 Near-duplicate pruning before retrieval
+### 4.2 Near-duplicate pruning before retrieval (when embeddings are on)
 
-**Decision.** After embedding, greedily drop any chunk whose cosine similarity to an
-already-kept chunk exceeds 0.93.
+**Decision.** When embeddings are available, greedily drop any chunk whose cosine similarity to
+an already-kept chunk exceeds 0.93. (In keyword-only mode this step is skipped; exact-duplicate
+chunks are still removed by content-hash ids at ingestion.)
 
 **Why.** Shared nav/footer/CTA boilerplate survives per-page content hashing and would
 otherwise waste tokens and **over-count the same "evidence."** Pruning keeps the snippet set
@@ -248,10 +264,10 @@ mounted volume; `VITE_API_BASE` allows a split deploy if needed.
 
 ## 5. Token & quality optimizations (summary)
 
-- **Semantic facet retrieval** with hard caps (~24 sender / ~18 target snippets) bounds every
-  reasoning call's input.
-- **Near-duplicate pruning** removes repeated boilerplate so tokens (and evidence counts)
-  aren't wasted.
+- **Facet retrieval** (semantic or keyword) with hard caps (~24 sender / ~18 target snippets)
+  bounds every reasoning call's input.
+- **Near-duplicate pruning** (semantic mode) removes repeated boilerplate so tokens (and
+  evidence counts) aren't wasted.
 - **Cheap/strong model split** spends strong-model tokens only on synthesis and writing.
 - **Strategist pre-computes allowed claims**, shrinking the drafter's job and the redraft loop.
 - **`max_tokens` budgets** (1200–1800) cap output per call.
@@ -283,7 +299,7 @@ mounted volume; `VITE_API_BASE` allows a split deploy if needed.
 | Limitation | Planned improvement |
 |---|---|
 | No headless rendering for JS-heavy sites | Optional Playwright fallback when extracted text is thin |
-| Embeddings are CPU-bound and add a heavy dep | Optional hosted embeddings, or cache vectors per domain |
+| Production retrieval is keyword-only (embeddings omitted for a lean deploy) | Run on a base image with the C++ runtime and install the `numpy`+`fastembed` extras, or use hosted embeddings + a cached vector store per domain |
 | Single corrective redraft round | Make rounds adaptive/configurable; escalate persistent failures |
 | Signals not cross-verified | Confirm each signal against a second independent source |
 | No automated eval of email quality | LLM-as-judge rubric + a regression set of sender/target pairs |

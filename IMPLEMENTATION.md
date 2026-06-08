@@ -15,8 +15,8 @@ works in code. Pair it with [`DESIGN.md`](./DESIGN.md) (the *why*) and
 | HTTP client | **httpx** (async) | 0.27 | Concurrent page fetches via `asyncio.gather` |
 | HTML→text | **trafilatura** | 1.12 | Boilerplate-stripped main-content extraction |
 | Domain parsing | **tldextract** | 5.3 | Reliable root-domain extraction for same-site link filtering |
-| **Embeddings** | **fastembed** (`BAAI/bge-small-en-v1.5`) | 0.8 | **Local** semantic retrieval — no extra API key, no per-token cost |
-| **Vector math** | **numpy** | 2.4 | Cosine similarity for retrieval + near-dup pruning |
+| **Embeddings** *(optional)* | **fastembed** (`BAAI/bge-small-en-v1.5`) | 0.8 | **Local** semantic retrieval — no extra API key, no per-token cost. Omitted from the default deploy; install for local semantic RAG |
+| **Vector math** *(optional)* | **numpy** | 2.4 | Cosine similarity for retrieval + near-dup pruning. Optional, paired with `fastembed` |
 | LLM SDK | **anthropic** | 0.39 | Claude models, server-side `web_search`, forced tool-use for JSON |
 | Validation | **pydantic** | 2.9 | Request body schemas |
 | Config | **python-dotenv** | 1.0 | Loads `backend/local.env` so keys aren't shell-exported |
@@ -24,7 +24,10 @@ works in code. Pair it with [`DESIGN.md`](./DESIGN.md) (the *why*) and
 | Frontend | **React 18 + Vite 5 + Tailwind 3** | — | Fast SPA, hot reload, utility styling |
 
 Deployment: **nixpacks** builds the React bundle and runs uvicorn, which serves both the API
-and the static SPA from one origin (Railway-ready).
+and the static SPA from one origin (Railway-ready). The default deploy is **pure-Python** —
+`numpy`/`fastembed` are intentionally excluded so the image has no native-library dependencies
+(no `libstdc++` / `onnxruntime`), and retrieval runs in keyword mode. Installing the two
+optional packages locally re-enables semantic embeddings with no code change.
 
 ---
 
@@ -55,14 +58,17 @@ outbound-iq/
 
 The grounding engine. Knows nothing about LLMs.
 
-### 3.1 Local embeddings (lazy, with fallback)
+### 3.1 Local embeddings (optional, lazy, with fallback)
+- `numpy` is imported **defensively** at module top: `try: import numpy as np / except: np =
+  None`. So the module imports fine on a deploy where numpy isn't installed.
 - `EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"`.
-- `_get_embedder()` lazily imports `fastembed.TextEmbedding` on first use; if the import or
-  model load fails, it sets `_embedder_failed` and returns `None` **once and forever** (no
-  repeated retries).
-- `embed_texts(texts)` returns an `(N, dim)` **L2-normalized** float32 matrix (so a dot
-  product == cosine similarity), or `None` if embeddings are unavailable. This `None` is the
-  signal that triggers keyword fallback everywhere downstream.
+- `_get_embedder()` returns `None` immediately if `np is None`; otherwise it lazily imports
+  `fastembed.TextEmbedding` on first use. Any failure (no numpy, no fastembed, model load
+  error) sets `_embedder_failed` and returns `None` **once and forever** (no repeated retries).
+- `embed_texts(texts)` returns an `(N, dim)` **L2-normalized** float32 matrix (so a dot product
+  == cosine similarity), or `None` if embeddings are unavailable. This `None` is the single
+  signal that triggers keyword fallback everywhere downstream — every `np.*` call lives behind
+  it, so numpy is never touched when absent.
 
 ### 3.2 `Snippet` (dataclass)
 `id, url, title, text, source_type ("page"|"search"), page_kind, vec (np.ndarray|None)`.
@@ -87,8 +93,8 @@ In-memory `id→Snippet` with an embedding lifecycle.
 - `add()` skips text < 40 chars and dedupes by content-hash id.
 - **`finalize(dedupe_threshold=0.93)`** — embeds **all** snippets once (batched), assigns
   `s.vec`, then does **greedy near-duplicate pruning**: keep the first occurrence, drop any
-  later snippet whose max cosine similarity to a kept one ≥ 0.93. No-op (and `_embedded=False`)
-  if embeddings are unavailable.
+  later snippet whose max cosine similarity to a kept one ≥ 0.93. **No-op** (and
+  `_embedded=False`) if embeddings are unavailable — the keyword path needs no pre-processing.
 - **`semantic_search(query, limit, prefer_kinds)`** — embeds the query, scores every snippet by
   `vec · q` (+0.05 for preferred page kinds), returns the top `limit`. **Falls back** to
   `search()` if embeddings are unavailable or any snippet lacks a vector.
@@ -274,7 +280,10 @@ deliberate simplicity trade-off versus streaming real per-step progress from the
 
 - **Config/secrets** live in `backend/local.env` (gitignored): `ANTHROPIC_API_KEY`, optional
   `CHEAP_MODEL`/`STRONG_MODEL`, optional `ANTHROPIC_BASE_URL`. Real env vars override the file.
-  **No embeddings key needed** — `fastembed` downloads the ~130 MB model once on first run.
+- **Optional semantic retrieval** — `pip install numpy==2.4.6 fastembed==0.8.0` (these are
+  commented in `requirements.txt`, not installed by the default deploy). No embeddings key
+  needed; `fastembed` downloads the ~130 MB model once on first run. Without them, retrieval
+  runs in keyword mode.
 - **Local run**: backend `uvicorn server:app` on :8000; frontend `npm run dev` (or
   `npm run build` to let the backend serve the SPA).
 - **Deploy** (`nixpacks.toml`): install deps → `npm run build` → start uvicorn on `$PORT`,
@@ -288,8 +297,8 @@ deliberate simplicity trade-off versus streaming real per-step progress from the
 ```
 POST /api/sender/analyze {url:"artisan.co"}
   → crawl: homepage + about/product/pricing/customers… (parallel)
-  → finalize: embed all chunks + prune near-duplicates
-  → _retrieve_facets(7 ICP queries) → ~24 snippets
+  → finalize: embed all chunks + prune near-duplicates (no-op in keyword mode)
+  → _retrieve_facets(7 ICP queries) → ~24 snippets  (semantic or keyword)
   → STRONG _complete_json(SENDER_SCHEMA): value prop + ICP citing ids
   → evidence map → db.save_sender → {profile, evidence, usage, id:"snd_…"}
 ```

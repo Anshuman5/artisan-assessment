@@ -25,8 +25,8 @@ Given a **target** company's website plus a recipient persona (role + seniority)
 ```
 outbound-iq/
 ├── backend/              # FastAPI + agentic pipeline (Python)
-│   ├── retrieval.py      # Live fetch + chunking + local embeddings, semantic
-│   │                     #   retrieval, near-duplicate dedup, evidence store
+│   ├── retrieval.py      # Live fetch + chunking + pluggable retrieval (optional local
+│   │                     #   embeddings → semantic; keyword fallback), evidence store
 │   ├── agent.py          # Agent graph: research, signal mining, ICP fit,
 │   │                     #   messaging strategy, drafting, claim verification
 │   ├── db.py             # SQLite persistence (senders + evaluations)
@@ -45,7 +45,7 @@ crawl ─▶ embed + dedupe ─▶ facet retrieval ─▶ signal extraction (web
 ```
 
 **Design highlights**
-- **Snippet-grounded RAG, not full-context stuffing:** pages are chunked, embedded locally (BAAI `bge-small` via `fastembed` — no extra API key), and only the snippets semantically closest to each reasoning facet (industries, personas, pains, triggers, persona-fit) are fed to the model. Near-duplicate boilerplate is pruned by cosine similarity.
+- **Snippet-grounded RAG, not full-context stuffing:** pages are chunked and only the snippets relevant to each reasoning facet (industries, personas, pains, triggers, persona-fit) are fed to the model. Retrieval is **pluggable behind one interface** — when the optional embedding deps are installed it uses local semantic search (BAAI `bge-small` via `fastembed`, no extra API key) with cosine near-duplicate pruning; otherwise it falls back to keyword ranking. The default deploy is pure-Python (keyword mode) so it has no native-library dependencies.
 - **Explicit claim verification:** every factual claim about the target is checked for entailment against its cited snippet by a verifier agent. Unsupported claims trigger one corrective redraft and are flagged in the claim map — preventing hallucinated facts from shipping.
 - **Messaging strategist gates the drafter:** before drafting, a strategist produces the angles plus an *allowed-claims* whitelist (and an off-limits list); the drafter may only assert approved claims.
 - **Constraint enforcement:** emails are validated for length (80–130 words), subject length, and placeholder tokens, with one corrective pass on violation.
@@ -60,7 +60,7 @@ crawl ─▶ embed + dedupe ─▶ facet retrieval ─▶ signal extraction (web
 - Python 3.10+
 - Node.js 18+
 - An Anthropic API key (the agent uses Claude models)
-- No embeddings key needed — retrieval uses a local model (`fastembed`, ~130 MB, downloaded once on first run)
+- (Optional) for local **semantic** retrieval: `pip install numpy==2.4.6 fastembed==0.8.0` — no embeddings key needed; `fastembed` downloads a ~130 MB model once on first run. Without these, retrieval runs in keyword mode (the default for lean deploys).
 
 ### 1. Backend
 

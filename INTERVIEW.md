@@ -10,8 +10,9 @@ the actual code. Read with [`DESIGN.md`](./DESIGN.md) and
 > messaging strategy, drafts two evidence-backed cold emails with different angles, then
 > **verifies every claim against its cited snippet and redrafts if anything is unsupported**.
 > Output includes a claim map tying each claim to a citation with a verified status. It's
-> **semantic-RAG-grounded (local embeddings), not context-stuffed**, uses a **cheap/strong
-> model split**, and **meters tokens per step** so the optimization is measurable.
+> **RAG-grounded, not context-stuffed** (a pluggable retriever — local embeddings when
+> available, keyword ranking in production), uses a **cheap/strong model split**, and **meters
+> tokens per step** so the optimization is measurable.
 
 ---
 
@@ -57,17 +58,35 @@ dimension — and union the top hits into a bounded set (~24 sender / ~18 target
 model gets a compact numbered list and must cite snippet ids, which I resolve to `{url,
 snippet}` for the claim map. Full page text never enters the prompt.
 
-**Q6. Why embeddings instead of keyword ranking?**
-Semantic retrieval surfaces the right evidence even when wording differs from the query, and
-per-facet queries guarantee coverage of every ICP dimension. I kept the keyword ranker as a
-**fallback** (`search()`), so if the embedding model can't load the app still works — just less
-precisely. (My earlier version was keyword-only; this is the upgrade I called out as next.)
+**Q6. Embeddings vs keyword ranking — which do you actually use?**
+Both, behind one interface. Semantic retrieval (embeddings) surfaces the right evidence even when
+wording differs from the query, and per-facet queries guarantee coverage of every ICP dimension —
+that's the preferred path locally. But embeddings are an *optional* dependency, so the keyword
+ranker (`search()`) is the production default and the fallback whenever the embedding model can't
+load. `semantic_search()` picks the backend automatically; callers never branch. See Q7 for why
+production is keyword-only.
 
-**Q7. Why *local* embeddings, and what's the cost?**
-No second API key, no per-token embedding cost, data stays on the box, and it's deterministic.
-The cost is a one-time ~130 MB model download and CPU latency. It's lazy-loaded
-(`_get_embedder`) so importing the module is cheap, and a failed load flips a flag once and
-falls back to keyword ranking rather than retrying.
+**Q7. Why are embeddings *optional*, and why does production run keyword-only?**
+This is a deliberate **graceful-degradation** decision driven by a real deployment constraint.
+Local embeddings pull in native wheels — `numpy`, and `onnxruntime` via `fastembed` — which need
+the C++ runtime (`libstdc++.so.6`) at import time. On Railway/Nixpacks that runtime isn't on the
+linker path, so the app crashed at boot (`ImportError: libstdc++.so.6`), and even once fixed the
+~130 MB model download on an ephemeral filesystem + onnxruntime memory risk OOMing a small
+instance. Since retrieval was already written behind one interface with a keyword fallback, I
+made the native deps **optional**: the default deploy is pure-Python (keyword retrieval, always
+boots), and `pip install numpy fastembed` re-enables semantic search locally with **zero code
+change**. I'd rather ship a deploy that always boots than a semantically-richer one that crashes
+on native libs. (Talking point: this is the classic "make the expensive/fragile dependency
+optional behind a stable interface" pattern.)
+
+**Q7b. How exactly does the fallback stay invisible to the rest of the code?**
+`numpy` is imported defensively (`try: import numpy as np / except: np = None`).
+`_get_embedder()` returns `None` if numpy is missing; `embed_texts()` returns `None` whenever the
+embedder is unavailable, and **every** `np.*` call sits behind that `None` check. So
+`finalize()` becomes a no-op and `semantic_search()` calls the keyword ranker — the call sites in
+`agent.py` are identical in both modes. I verified this by importing the module with numpy/
+fastembed forcibly blocked: it imports, `finalize()` no-ops, and `semantic_search()` returns
+correct keyword hits.
 
 **Q8. What's the near-duplicate pruning about?**
 After embedding, `finalize()` greedily drops any chunk whose cosine similarity to an
@@ -169,10 +188,11 @@ forces it via `tool_choice`. The model is constrained to the contract, so a stru
 fallback (and as the primary parser for the web-search step, whose final message is a plain JSON
 array).
 
-**Q21. What if the embedding model isn't available at runtime?**
-`embed_texts` returns `None`, `finalize()` becomes a no-op (`embedded=False`, no pruning), and
+**Q21. What if numpy/the embedding model isn't available at runtime?**
+That's the *normal* production case (numpy is excluded from the default deploy). `embed_texts`
+returns `None`, `finalize()` becomes a no-op (`embedded=False`, no pruning), and
 `semantic_search` transparently falls back to the keyword ranker. The app degrades gracefully
-rather than failing.
+rather than failing — and `meta["embedded"]` records which mode ran.
 
 **Q22. What if a site can't be fetched or is JS-heavy?**
 `fetch_html` swallows errors to `None`, guards on status ≥400 / non-HTML, and
@@ -252,7 +272,7 @@ would be locked to the known origin in prod.
 
 | Topic | One-liner |
 |---|---|
-| Grounding | chunk → embed → dedupe → semantic facet retrieval → cite ids → verify entailment → claim map |
+| Grounding | chunk → (optional embed → dedupe) → facet retrieval (semantic *or* keyword) → cite ids → verify entailment → claim map |
 | Token opt | semantic caps, near-dup prune, cheap/strong split, strategist gate, `max_tokens`, ICP reuse, **per-step metering** |
 | Agentic | crawl → web_search signals → fit → strategy(gate) → draft → verify → redraft → claim map |
 | Models | Haiku (signals/strategy/verify) vs Sonnet (ICP synth/fit/draft/redraft), env-driven |
@@ -260,7 +280,7 @@ would be locked to the known origin in prod.
 | Strategy gate | allowed-claims whitelist + off-limits list pre-computed before drafting |
 | Verification | cheap verifier judges each claim ↔ snippet (supported/partial/unsupported); ≤1 redraft |
 | Two angles | pain-led (owned problem) vs trigger-led (recent event) |
-| Embeddings | local `fastembed`/bge-small, lazy-loaded, keyword fallback, cosine dedup @0.93 |
+| Embeddings | **optional** local `fastembed`/bge-small (lazy, cosine dedup @0.93); keyword retrieval is the production default + auto-fallback |
 | Persistence | SQLite, full-JSON `data` column + promoted columns, env `DB_PATH` |
 | Deploy | nixpacks: build SPA + run uvicorn, one origin serves API + app |
 | Top next steps | LLM-judge eval harness · cross-run embedding cache · SSE progress |

@@ -6,5 +6,7 @@ tldextract==5.3.1
 anthropic==0.39.0
 pydantic==2.9.2
 python-dotenv==1.0.1
-fastembed==0.8.0
-numpy==2.4.6
+
+# Optional: local semantic embeddings. Not installed on lean deploys (Railway),
+# where retrieval falls back to keyword ranking. Install locally for semantic RAG:
+#   pip install numpy==2.4.6 fastembed==0.8.0
