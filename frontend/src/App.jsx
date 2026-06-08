@@ -227,6 +227,8 @@ function SenderResult({ data, goTargets, onEvidence }) {
           <span className="font-medium" style={{ color: 'var(--text)' }}>Analyst notes & gaps: </span>{p.notes}
         </div>
       )}
+
+      <UsageFooter usage={data.usage} snippetCount={data.snippet_count} />
     </div>
   );
 }
@@ -369,6 +371,9 @@ function TargetResult({ result, onEvidence }) {
         </div>
       </div>
 
+      {/* Messaging strategy */}
+      {result.strategy && <StrategyPanel strategy={result.strategy} />}
+
       {/* Emails */}
       <div className="grid md:grid-cols-2 gap-5">
         {(result.emails || []).map((em, i) => <EmailCard key={i} em={em} pill={pill} />)}
@@ -376,6 +381,8 @@ function TargetResult({ result, onEvidence }) {
 
       {/* Claim map */}
       <ClaimMap rows={result.claim_map || []} onEvidence={(x) => onEvidence({ map: ev, id: x })} />
+
+      <UsageFooter usage={result.usage} snippetCount={result.snippet_count} />
     </div>
   );
 }
@@ -418,12 +425,17 @@ function EmailCard({ em, pill }) {
 
 function ClaimMap({ rows, onEvidence }) {
   const resolved = rows.filter((r) => r.resolved).length;
+  const statusMeta = {
+    supported: { color: 'var(--good)', label: '✓ verified' },
+    partial: { color: 'var(--warn)', label: '~ partial' },
+    unsupported: { color: 'var(--bad)', label: '⚠ unsupported' },
+  };
   return (
     <div className="card p-5 fade-in">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-sm font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Claim map / evidence panel</h3>
-          <p className="text-xs mt-0.5" style={{ color: 'var(--text-faint)' }}>Every factual claim used in the emails, with its supporting source.</p>
+          <p className="text-xs mt-0.5" style={{ color: 'var(--text-faint)' }}>Every factual claim is verified against its cited snippet before it ships.</p>
         </div>
         <span className="chip px-2.5 py-1 text-xs mono"
           style={{ color: resolved === rows.length && rows.length ? 'var(--good)' : 'var(--warn)' }}>
@@ -432,21 +444,76 @@ function ClaimMap({ rows, onEvidence }) {
       </div>
       {rows.length === 0 && <p className="text-sm" style={{ color: 'var(--text-faint)' }}>No claims recorded.</p>}
       <div className="grid gap-2">
-        {rows.map((r, i) => (
-          <div key={i} className="grid grid-cols-[80px_1fr_auto] gap-3 items-start py-2 border-b last:border-0 text-sm"
-            style={{ borderColor: 'var(--border-soft)' }}>
-            <span className="chip text-[10px] px-1.5 py-0.5 uppercase tracking-wide text-center"
-              style={r.angle === 'pain-led' ? { color: '#fca5a5' } : { color: '#7dd3fc' }}>{r.angle}</span>
-            <span className="flex-1">{r.claim}</span>
-            <div className="text-right">
-              {r.resolved ? (
-                r.url ? <a href={r.url} target="_blank" rel="noreferrer" className="evidence-pill">↗ source</a>
-                  : <span className="evidence-pill" onClick={() => onEvidence(r.evidence_id)}>{r.evidence_id}</span>
-              ) : <span className="text-xs" style={{ color: 'var(--bad)' }}>⚠ unsupported</span>}
+        {rows.map((r, i) => {
+          const sm = statusMeta[r.status] || (r.resolved ? statusMeta.supported : statusMeta.unsupported);
+          return (
+            <div key={i} className="grid grid-cols-[80px_1fr_auto] gap-3 items-start py-2 border-b last:border-0 text-sm"
+              style={{ borderColor: 'var(--border-soft)' }}>
+              <span className="chip text-[10px] px-1.5 py-0.5 uppercase tracking-wide text-center"
+                style={r.angle === 'pain-led' ? { color: '#fca5a5' } : { color: '#7dd3fc' }}>{r.angle}</span>
+              <span className="flex-1">{r.claim}</span>
+              <div className="text-right flex flex-col items-end gap-1">
+                <span className="text-[11px] mono" style={{ color: sm.color }}>{sm.label}</span>
+                {r.resolved && (r.url
+                  ? <a href={r.url} target="_blank" rel="noreferrer" className="evidence-pill">↗ source</a>
+                  : <span className="evidence-pill" onClick={() => onEvidence(r.evidence_id)}>{r.evidence_id}</span>)}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+    </div>
+  );
+}
+
+function StrategyPanel({ strategy }) {
+  const allowed = strategy.claims_allowed || [];
+  const notAllowed = strategy.claims_not_allowed || [];
+  return (
+    <div className="card p-5 fade-in">
+      <h3 className="text-sm font-semibold uppercase tracking-wide mb-3" style={{ color: 'var(--text-dim)' }}>
+        Messaging strategy <span className="text-xs font-normal" style={{ color: 'var(--text-faint)' }}>· angles + approved claims gate the drafter</span>
+      </h3>
+      <div className="grid md:grid-cols-2 gap-4 text-sm">
+        <div>
+          <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: 'var(--text-faint)' }}>Pain-led angle</div>
+          <p style={{ color: 'var(--text-dim)' }}>{strategy.pain_led_angle}</p>
+          <div className="text-[11px] uppercase tracking-wider mt-3 mb-1" style={{ color: 'var(--text-faint)' }}>Trigger-led angle</div>
+          <p style={{ color: 'var(--text-dim)' }}>{strategy.trigger_led_angle}</p>
+        </div>
+        <div>
+          <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: 'var(--good)' }}>Allowed claims ({allowed.length})</div>
+          <ul className="grid gap-1 mb-3">
+            {allowed.slice(0, 6).map((c, i) => (
+              <li key={i} className="text-xs flex gap-1.5" style={{ color: 'var(--text-dim)' }}>
+                <span style={{ color: 'var(--good)' }}>✓</span>{typeof c === 'string' ? c : c.claim}</li>
+            ))}
+          </ul>
+          {notAllowed.length > 0 && <>
+            <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: 'var(--bad)' }}>Off-limits ({notAllowed.length})</div>
+            <ul className="grid gap-1">
+              {notAllowed.slice(0, 4).map((c, i) => (
+                <li key={i} className="text-xs flex gap-1.5" style={{ color: 'var(--text-faint)' }}>
+                  <span style={{ color: 'var(--bad)' }}>✕</span>{typeof c === 'string' ? c : c.claim}</li>
+              ))}
+            </ul>
+          </>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UsageFooter({ usage, snippetCount }) {
+  if (!usage) return null;
+  const t = usage.total_tokens || 0;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[11px] mono" style={{ color: 'var(--text-faint)' }}>
+      <span className="chip px-2 py-0.5">{t.toLocaleString()} tokens</span>
+      <span className="chip px-2 py-0.5">{usage.input_tokens?.toLocaleString()} in · {usage.output_tokens?.toLocaleString()} out</span>
+      <span className="chip px-2 py-0.5">{usage.calls} model calls</span>
+      {snippetCount != null && <span className="chip px-2 py-0.5">{snippetCount} snippets retrieved</span>}
+      <span style={{ color: 'var(--text-faint)' }}>· grounded on retrieved snippets, not full-page stuffing</span>
     </div>
   );
 }

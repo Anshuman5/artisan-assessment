@@ -25,17 +25,33 @@ Given a **target** company's website plus a recipient persona (role + seniority)
 ```
 outbound-iq/
 ├── backend/              # FastAPI + agentic pipeline (Python)
-│   ├── retrieval.py      # Live fetch + chunking into ranked snippets, evidence store
-│   ├── agent.py          # Orchestration: sender analysis, signal mining, fit eval, drafting
+│   ├── retrieval.py      # Live fetch + chunking + local embeddings, semantic
+│   │                     #   retrieval, near-duplicate dedup, evidence store
+│   ├── agent.py          # Agent graph: research, signal mining, ICP fit,
+│   │                     #   messaging strategy, drafting, claim verification
 │   ├── db.py             # SQLite persistence (senders + evaluations)
 │   └── server.py         # API endpoints + serves the built frontend
 └── frontend/             # Vite + React + Tailwind SPA
     └── src/              # App.jsx, components.jsx, api.js, styles
 ```
 
+**Mode 2 agent graph**
+
+```
+crawl ─▶ embed + dedupe ─▶ facet retrieval ─▶ signal extraction (web search)
+      ─▶ ICP fit scoring ─▶ messaging strategy (allowed-claims gate)
+      ─▶ email drafting ─▶ claim verification (entailment) ─▶ constraint check
+      ─▶ corrective redraft (≤1) ─▶ claim map
+```
+
 **Design highlights**
-- **Agentic, snippet-grounded:** pages are chunked into compact snippets, keyword-ranked, and only the selected ones are fed to the model — optimized for token usage.
-- **Balanced model routing:** a cheap model handles extraction and signal-mining; a stronger model handles synthesis and email drafting.
+- **Snippet-grounded RAG, not full-context stuffing:** pages are chunked, embedded locally (BAAI `bge-small` via `fastembed` — no extra API key), and only the snippets semantically closest to each reasoning facet (industries, personas, pains, triggers, persona-fit) are fed to the model. Near-duplicate boilerplate is pruned by cosine similarity.
+- **Explicit claim verification:** every factual claim about the target is checked for entailment against its cited snippet by a verifier agent. Unsupported claims trigger one corrective redraft and are flagged in the claim map — preventing hallucinated facts from shipping.
+- **Messaging strategist gates the drafter:** before drafting, a strategist produces the angles plus an *allowed-claims* whitelist (and an off-limits list); the drafter may only assert approved claims.
+- **Constraint enforcement:** emails are validated for length (80–130 words), subject length, and placeholder tokens, with one corrective pass on violation.
+- **Balanced model routing:** a cheap model handles signal-mining, strategy, and verification; a stronger model handles ICP synthesis and drafting.
+- **Token accounting:** every run reports input/output tokens per step so the token-optimization is measurable (shown in the UI).
+- **Structured outputs:** model steps use tool-use/JSON-schema forcing, so malformed output can't silently produce a blank result.
 - **Persistence:** sender ICP profiles and target evaluations are saved to SQLite, so a sender's ICP can be reused across many target accounts.
 
 ## Getting started
@@ -44,6 +60,7 @@ outbound-iq/
 - Python 3.10+
 - Node.js 18+
 - An Anthropic API key (the agent uses Claude models)
+- No embeddings key needed — retrieval uses a local model (`fastembed`, ~130 MB, downloaded once on first run)
 
 ### 1. Backend
 

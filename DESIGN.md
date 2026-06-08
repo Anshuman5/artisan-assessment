@@ -1,7 +1,7 @@
 # OutboundIQ — Design Document
 
 This document explains **what** OutboundIQ is, **why** it is built the way it is, and the
-**design trade-offs** behind every major decision. It is written to be read alongside
+**design trade-offs** behind every major decision. Read it alongside
 [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) (the *how*) and [`INTERVIEW.md`](./INTERVIEW.md)
 (anticipated questions).
 
@@ -24,9 +24,9 @@ Turn **public company information** into **outbound strategy**. Two modes:
 
 | Requirement | Design response |
 |---|---|
-| Answers/emails must be based on **retrieved snippets, not full-context stuffing** | A retrieval layer chunks fetched pages into small snippets, keyword-ranks them, and feeds the model only a **bounded, numbered subset**. Every claim must cite a snippet id. |
-| Implement an **agentic** solution that *plans → retrieves evidence → finds signals → drafts* | A multi-step pipeline where each step is a discrete LLM call with a single responsibility, plus a real tool-using agent step (Claude `web_search`) for live signal mining. |
-| **Optimize for token usage and quality** | Two-tier model routing (cheap model for extraction/search, strong model for synthesis/drafting), strict snippet caps and per-page-kind quotas, compact prompts, and `max_tokens` budgets per call. |
+| Answers/emails must be based on **retrieved snippets, not full-context stuffing** | A RAG layer chunks fetched pages, **embeds them locally**, prunes near-duplicate boilerplate, and retrieves only the snippets **semantically closest to each reasoning facet**. Every claim must cite a snippet id, and each claim is **verified for entailment** against that snippet before it ships. |
+| Implement an **agentic** solution that *plans → retrieves evidence → finds signals → drafts* | A multi-step agent graph where each node is a discrete, single-responsibility LLM call: research → signal mining (tool use) → ICP fit → messaging strategy → drafting → claim verification → corrective redraft. |
+| **Optimize for token usage and quality** | Two-tier model routing (cheap for mining/strategy/verification, strong for synthesis/drafting), semantic retrieval with hard snippet caps, dedup, small structured prompts, `max_tokens` budgets, and **per-step token metering surfaced in the UI** so the optimization is measurable. |
 
 ---
 
@@ -35,231 +35,246 @@ Turn **public company information** into **outbound strategy**. Two modes:
 ```
 ┌───────────────────────────────────────────────────────────────────┐
 │  Frontend (Vite + React + Tailwind SPA)                            │
-│  Mode 1 panel · Mode 2 panel · Evidence drawer · Claim map         │
+│  Mode 1 · Mode 2 · Strategy panel · Claim map · Evidence drawer    │
+│  · Token-usage footer                                              │
 └───────────────────────────────────────────────────────────────────┘
                     │  JSON over HTTP (/api/*)
                     ▼
 ┌───────────────────────────────────────────────────────────────────┐
 │  Backend (FastAPI)  — server.py                                    │
 │   ┌─────────────────────────────────────────────────────────────┐ │
-│   │  agent.py — agentic orchestration                           │ │
+│   │  agent.py — agentic orchestration + TokenMeter              │ │
 │   │   Mode 1: analyze_sender()                                  │ │
-│   │   Mode 2: research_target_signals → evaluate fit → draft   │ │
+│   │   Mode 2: signals → fit → strategy → draft → verify/refine │ │
 │   └─────────────────────────────────────────────────────────────┘ │
 │   ┌──────────────────────────┐   ┌──────────────────────────────┐ │
 │   │ retrieval.py             │   │ db.py (SQLite)               │ │
-│   │  crawl · extract · chunk │   │  senders + evaluations       │ │
-│   │  EvidenceStore + ranking │   │                              │ │
+│   │  crawl · chunk · embed   │   │  senders + evaluations       │ │
+│   │  dedupe · semantic search│   │                              │ │
 │   └──────────────────────────┘   └──────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────────┘
-        │ httpx fetch (own pages)      │ Anthropic API (LLM + web_search tool)
-        ▼                              ▼
-   Company websites              Claude models / live web
+        │ httpx (own pages)   │ Anthropic API (LLM + web_search)   │ fastembed (local, no key)
+        ▼                     ▼                                     ▼
+   Company websites      Claude models / live web            bge-small embeddings
 ```
 
 **Separation of concerns** is the organizing principle:
 
-- `retrieval.py` knows nothing about LLMs — it only fetches, extracts, chunks, stores, and ranks evidence.
-- `agent.py` knows nothing about HTTP or SQL — it orchestrates LLM calls over evidence.
-- `server.py` is a thin transport + persistence boundary.
-- `db.py` is pure persistence.
+- `retrieval.py` knows nothing about LLMs — it fetches, extracts, chunks, **embeds**,
+  dedupes, stores, and **semantically retrieves** evidence.
+- `agent.py` knows nothing about HTTP or SQL — it orchestrates the agent graph over evidence.
+- `server.py` is a thin transport + persistence boundary; `db.py` is pure persistence.
 
-This makes each layer independently testable and swappable (e.g. replace SQLite with Postgres, or swap the keyword ranker for embeddings, without touching the others).
+Each layer is independently testable and swappable (e.g. swap the embedding model, or
+SQLite for Postgres, without touching the others).
 
 ---
 
 ## 3. The agentic pipeline
 
-The word "agentic" here means: **the system plans a sequence of steps, decides what
-evidence to retrieve, uses tools to gather live signals, and composes intermediate
-outputs into a final deliverable** — rather than a single prompt that does everything.
+"Agentic" here means the system **plans a sequence of steps, decides what evidence to
+retrieve, uses tools to gather live signals, gates drafting behind a strategy, and verifies
+its own output** — rather than one prompt that does everything.
 
 ### Mode 1 — Sender analysis (`analyze_sender`)
 
 ```
-plan → fetch homepage → discover priority pages → fetch in parallel
-     → chunk into snippets → select balanced subset → synthesize ICP+value prop (1 LLM call)
-     → attach evidence map → persist
+crawl homepage → discover & fetch priority pages (parallel) → chunk
+   → embed all snippets once + prune near-duplicates
+   → facet retrieval (7 ICP-dimension queries) → top ~24 snippets
+   → synthesize value prop + structured ICP (1 strong-model call, JSON-schema forced)
+   → resolve cited ids → evidence map → persist (+ token usage)
 ```
-
-1. **Plan / crawl.** Fetch the homepage, then *discover* internal links and classify
-   them into known page kinds (about, product, pricing, customers, blog, careers,
-   contact) using URL-path heuristics. Fetch the priority pages **in parallel**.
-2. **Retrieve.** Extract main text (boilerplate-stripped) and chunk it into ~480-char
-   snippets stored in an `EvidenceStore`.
-3. **Select.** Pick a **token-bounded, representative** snippet set using per-page-kind
-   quotas (e.g. 6 home, 6 product, 5 customers…) capped at 26 snippets.
-4. **Synthesize.** A single strong-model call produces structured JSON: value prop,
-   differentiators, and a structured ICP — **each field citing snippet ids**.
-5. **Ground.** The cited ids are resolved back to `{url, title, snippet}` for the UI.
 
 ### Mode 2 — Target evaluation + drafting (`evaluate_target`)
 
 ```
-crawl target site → (cheap LLM + web_search) mine live signals
-   → (strong LLM) score fit vs ICP using snippets + signals
-   → (strong LLM) draft 2 emails (pain-led, trigger-led) with mandatory claims
-   → resolve all citations → build claim map → persist
+crawl target site → embed + dedupe
+   → [cheap + web_search]  mine live signals
+   → facet retrieval driven by the sender's ICP + the persona
+   → [strong]  score ICP fit across 5 dimensions
+   → [cheap]   messaging strategy: angles + ALLOWED-claims whitelist (+ off-limits list)
+   → [strong]  draft 2 emails (pain-led, trigger-led), constrained to allowed claims
+   → [cheap]   verify every claim's entailment against its cited snippet
+   → constraint check (length / subject / placeholders)
+   → [strong]  one corrective redraft if anything is unsupported or out of spec
+   → build claim map (with per-claim status) → persist (+ token usage)
 ```
 
-1. **Retrieve target's own pages** (same crawler as Mode 1).
-2. **Find signals.** A **cheap model** with Claude's `web_search` tool runs 2–4 queries
-   (funding, hiring, launches, news) and returns a strict JSON array of
-   `{finding, url, title, date_hint}`. This is the "find signals" step, and it is a
-   genuine tool-using agent loop.
-3. **Evaluate fit.** A **strong model** scores the target against the sender's ICP across
-   four dimensions (Industry, Company size, Pain match, Triggers), each with a rationale
-   and evidence references, plus suggested outreach hooks.
-4. **Draft.** A **strong model** writes two emails with *meaningfully different angles*
-   (pain-led vs trigger-led), each carrying a mandatory `claims` array mapping every
-   factual claim about the target to a snippet id or signal URL.
-5. **Claim map.** All claims across both emails are flattened and each citation resolved
-   to its source, with a `resolved` flag so the UI can flag any unsupported claim.
+The key agentic properties: **tool use** (live `web_search`), a **plan-before-draft gate**
+(the strategist whitelists claims), and a **self-correction loop** (verifier → redraft).
 
 ---
 
 ## 4. Key design decisions & trade-offs
 
-### 4.1 Snippet-grounded retrieval, not context stuffing
+### 4.1 Semantic RAG with local embeddings, not context stuffing
 
-**Decision.** Never feed full pages to the model. Chunk → store → rank → feed a small
-numbered subset; require the model to cite snippet ids.
-
-**Why.**
-- **Token cost.** A company site can be tens of thousands of tokens. Snippet selection
-  caps each reasoning call to ~26 short snippets.
-- **Grounding & verifiability.** Forcing citations to a finite snippet set makes
-  hallucination structurally harder and gives us a *claim map* for free — every claim
-  resolves to a real URL + text.
-- **Quality.** Curated, relevant snippets beat a wall of boilerplate (nav menus, cookie
-  banners) the model would otherwise have to wade through.
-
-**Trade-off.** A naive keyword ranker can miss semantically-relevant-but-lexically-different
-snippets. Accepted for v1 because it is zero-dependency, instant, and deterministic; the
-`search()` API is designed so an embedding ranker can drop in later.
-
-### 4.2 Two-tier model routing (cheap vs strong)
-
-**Decision.** `CHEAP_MODEL` (Haiku) for signal mining / extraction-style work;
-`STRONG_MODEL` (Sonnet) for synthesis, fit scoring, and email drafting.
-
-**Why.** Signal mining is mostly "run searches and reformat results" — cheap-model work.
-Synthesis and persuasive writing reward the stronger model. This is the core
-**token/quality optimization**: spend strong-model tokens only where they move the needle.
-
-**Trade-off.** More moving parts (two model ids). Mitigated by env-driven configuration so
-both can be overridden per environment.
-
-### 4.3 Discrete pipeline steps vs one mega-prompt
-
-**Decision.** Separate LLM calls for sender synthesis, signal mining, fit scoring, and
-drafting — not one giant prompt.
+**Decision.** Chunk every fetched page, embed all chunks **locally** with
+`BAAI/bge-small-en-v1.5` via `fastembed`, prune near-duplicates by cosine similarity, and
+retrieve only the snippets **semantically closest to each reasoning facet** (industries,
+personas, pains, triggers, persona-fit…). Feed the model a small numbered subset and require
+snippet-id citations.
 
 **Why.**
-- **Single responsibility per call** → tighter, smaller prompts → fewer tokens and clearer
-  failure isolation.
-- **Different inputs/tools per step** (drafting needs fit hooks + signals; signal mining
-  needs the web tool).
-- **Reusability.** A sender ICP is computed once and reused across many target evaluations
-  (persisted in SQLite), so Mode 1's cost is amortized.
+- **Token cost.** A company site is tens of thousands of tokens; facet retrieval caps each
+  reasoning call to ~18–24 short snippets.
+- **Relevance & quality.** Semantic retrieval surfaces the right evidence even when wording
+  differs from the query (vs. lexical keyword matching), and per-facet queries guarantee
+  *coverage* of every ICP dimension rather than just the top keyword hits.
+- **Grounding.** A finite, cited snippet set makes hallucination structurally harder and
+  yields the claim map for free.
 
-**Trade-off.** More round-trips (latency). Acceptable for an interactive analysis tool;
-the UI masks it with a staged progress indicator.
+**Why *local* embeddings.** No second API key, no per-token embedding cost, no data leaving
+the box for retrieval, and deterministic. The price is a one-time ~130 MB model download and
+some CPU. If the model can't load, the store **falls back to keyword ranking** — the app
+still works, just less precisely.
 
-### 4.4 Live tool use for external signals (`web_search`)
+**Trade-off.** Embedding adds CPU latency and a heavy dependency (`fastembed`, `numpy`).
+Accepted because retrieval quality is central to the brief; the lazy-load + keyword fallback
+keeps it robust.
 
-**Decision.** Use Anthropic's server-side `web_search` tool for the "find signals" step
-rather than scraping search engines ourselves.
+### 4.2 Near-duplicate pruning before retrieval
 
-**Why.** It is the part of the task that genuinely needs *fresh, runtime* information
-(funding, hiring, launches) that the target's own static site won't reveal. Server-side
-tool use keeps the agent loop inside one API call and returns real source URLs we can cite.
+**Decision.** After embedding, greedily drop any chunk whose cosine similarity to an
+already-kept chunk exceeds 0.93.
 
-**Trade-off / safeguards.** Models can fabricate URLs. We defend with (a) a strict
-instruction to only cite returned pages, (b) post-hoc validation that every signal URL
-starts with `http` and has a finding, and (c) capturing the search-result URLs the tool
-actually surfaced. Bad rows are dropped, not trusted.
+**Why.** Shared nav/footer/CTA boilerplate survives per-page content hashing and would
+otherwise waste tokens and **over-count the same "evidence."** Pruning keeps the snippet set
+diverse and the claim map honest.
 
-### 4.5 Structured JSON as the contract between model and UI
+**Trade-off.** A too-aggressive threshold could drop genuinely distinct text; 0.93 is
+conservative.
 
-**Decision.** Every LLM step returns strict JSON with an explicit schema embedded in the
-prompt; the backend extracts and defensively parses it.
+### 4.3 Structured outputs via forced tool-use
 
-**Why.** The UI renders structured artifacts (ICP fields, dimension scores, claim map). A
-JSON contract decouples model output from rendering and makes the evidence/claim plumbing
-mechanical.
+**Decision.** Every structured step calls the model with a single tool (`emit_result`) whose
+`input_schema` is the desired JSON shape, and `tool_choice` forces that tool. A best-effort
+text JSON parser remains only as a fallback.
 
-**Trade-off.** LLMs occasionally wrap JSON in prose or code fences. Handled by a
-brace-matching `_extract_json` that scans for the first balanced object/array and tolerates
-`<cite>` tags from web-search responses, rather than a brittle `json.loads`.
+**Why.** The UI renders structured artifacts (ICP fields, dimension scores, strategy, claim
+map). Schema-forced tool use means malformed output **can't silently produce a blank result**
+— the model is constrained to the contract. This is far more robust than parsing free-text
+JSON.
 
-### 4.6 Self-crawling the company's own site
+**Trade-off.** Slightly less flexible than free-text; mitigated by keeping the brace-matching
+`_extract_json` as a fallback (still used for the web-search signal step, whose final message
+is a plain JSON array).
 
-**Decision.** Fetch the company's own pages directly with `httpx` + `trafilatura` instead
-of relying solely on search.
+### 4.4 A messaging strategist that gates the drafter (allowed-claims whitelist)
 
-**Why.** The company's own site is the highest-signal, most-citable source for value prop
-and ICP, and fetching it directly is cheap and deterministic. Link discovery + page-kind
-classification ensures we read the *right* pages (pricing, customers) rather than just the
-homepage.
+**Decision.** Insert a dedicated *strategy* step between fit scoring and drafting. It outputs
+the two angles **plus an explicit `claims_allowed` whitelist** (each claim tied to an
+evidence id/url) and a `claims_not_allowed` list. The drafter may assert **only** whitelisted
+claims.
 
-**Trade-off.** JS-heavy sites that render content client-side may yield thin text
-(no headless browser). Accepted for scope; `favor_recall=True` and the http/www fallback
-variants reduce misses.
+**Why.** This is a **plan-before-act** pattern that attacks hallucination at the source:
+rather than hoping the drafter stays grounded, we pre-compute the exact set of supportable
+facts and forbid tempting-but-unsupported ones. It also separates *strategy* (cheap model)
+from *prose* (strong model), saving tokens.
 
-### 4.7 SQLite persistence
+**Trade-off.** An extra LLM call. Worth it: it measurably reduces unsupported claims and
+makes the redraft loop converge faster.
 
-**Decision.** Persist senders and evaluations in SQLite (file-based, zero-config).
+### 4.5 Claim verification (entailment) + constraint check + corrective redraft
 
-**Why.** Enables ICP reuse across targets, a "saved senders" UX, and revisiting past
-evaluations — without standing up a database server. `DB_PATH` is env-overridable for a
-mounted volume in deployment.
+**Decision.** After drafting, a **verifier** (cheap model) judges each `(claim, cited
+snippet)` pair as supported / partial / unsupported using **only** the snippet text. A
+deterministic checker validates spec constraints (80–130-word body, ≤7-word subject, no
+`[placeholder]` tokens). If any claim is unsupported or any constraint is violated, the strong
+model does **one corrective redraft** against targeted feedback.
 
-**Trade-off.** Single-writer, not horizontally scalable. Correct choice for a local-first
-tool; the `db.py` interface is small enough to reimplement on Postgres if needed.
+**Why.** The brief demands grounded emails; *asserting* grounding isn't enough. This is a
+**self-correction loop** that catches the model's own mistakes before they reach the user.
+Each claim ships with a status the UI surfaces (✓ verified / ~ partial / ⚠ unsupported).
 
-### 4.8 Monolithic deploy (backend serves the built SPA)
+**Trade-off.** Up to two extra calls (verify + redraft) and latency. Capped at **one** redraft
+round to bound cost; remaining issues are reported transparently rather than looped forever.
 
-**Decision.** In production the FastAPI app serves the built React bundle from one origin;
-the frontend uses relative API paths.
+### 4.6 Two-tier model routing (cheap vs strong)
 
-**Why.** One origin removes CORS complexity, one process to deploy (Railway/nixpacks), and
-the API base "just works" in prod while still allowing `localhost:8000` in dev and a
-`VITE_API_BASE` override.
+**Decision.** `CHEAP_MODEL` (Haiku) for signal mining, messaging strategy, and claim
+verification; `STRONG_MODEL` (Sonnet) for ICP synthesis, fit scoring, and email drafting
+(incl. redraft).
 
-**Trade-off.** Couples frontend and backend lifecycles. Fine for this scale; the split is
-still possible via `VITE_API_BASE`.
+**Why.** Mining/strategy/verification are extraction- and judgment-style tasks the cheap model
+handles well; synthesis and persuasive writing reward the strong model. This is the core
+token/quality lever — spend strong-model tokens only where they move the needle. Both ids are
+env-driven.
+
+### 4.7 Token metering as a first-class output
+
+**Decision.** A `TokenMeter` accumulates input/output tokens per step across the whole run;
+the result includes a `usage` summary and the UI shows a token footer.
+
+**Why.** The brief says "optimize for token usage." Making usage **measurable and visible**
+turns that from a claim into an observable property, and makes regressions obvious.
+
+**Trade-off.** None material — it's read from the API's `usage` field already returned by each
+call.
+
+### 4.8 Self-crawling the company's own site
+
+**Decision.** Fetch the company's own pages directly with `httpx` + `trafilatura`, discovering
+and classifying priority pages (about/product/pricing/customers/blog/careers/contact).
+
+**Why.** The company's own site is the highest-signal, most-citable source for value prop and
+ICP, and fetching it directly is cheap and deterministic.
+
+**Trade-off.** JS-heavy sites that render client-side may yield thin text (no headless
+browser). `favor_recall=True` and http/www fallbacks reduce misses.
+
+### 4.9 Live tool use for external signals (`web_search`)
+
+**Decision.** Use Anthropic's server-side `web_search` tool for the "find signals" step.
+
+**Why.** Funding/hiring/launch signals need *fresh, runtime* data the static site won't
+reveal. Server-side tool use keeps the agent loop in one call and returns real source URLs.
+
+**Safeguards.** Strict "only cite returned pages" instruction, capture of the URLs the tool
+actually surfaced, and post-hoc validation (URL must start with `http`, finding must be
+present); bad rows are dropped.
+
+### 4.10 SQLite persistence + monolithic deploy
+
+**Decision.** Persist senders/evaluations in SQLite (full-result JSON + a few promoted
+columns); in production the FastAPI app serves the built SPA from one origin.
+
+**Why.** SQLite enables ICP reuse across targets with zero config; one-origin deploy removes
+CORS friction and is one process to run (Railway/nixpacks). `DB_PATH` is env-overridable for a
+mounted volume; `VITE_API_BASE` allows a split deploy if needed.
 
 ---
 
 ## 5. Token & quality optimizations (summary)
 
-- **Snippet caps + per-kind quotas** bound every reasoning call's input.
-- **Chunk size (~480 chars)** keeps snippets granular enough to cite precisely without
-  bloating the prompt.
-- **Cheap model for search/extraction**, strong model only for synthesis/writing.
-- **`max_tokens` budgets** per call (1500–1800) cap output cost.
-- **Boilerplate stripping** (`trafilatura`) removes nav/footer noise before chunking.
-- **De-duplication** in `EvidenceStore` (content-hash ids) avoids feeding the same text
-  twice.
-- **Reusable sender ICP** amortizes Mode 1 cost across many Mode 2 runs.
-- **Compact, numbered snippet format** (`[id] (kind · url)\ntext`) minimizes scaffolding
-  tokens while preserving citability.
+- **Semantic facet retrieval** with hard caps (~24 sender / ~18 target snippets) bounds every
+  reasoning call's input.
+- **Near-duplicate pruning** removes repeated boilerplate so tokens (and evidence counts)
+  aren't wasted.
+- **Cheap/strong model split** spends strong-model tokens only on synthesis and writing.
+- **Strategist pre-computes allowed claims**, shrinking the drafter's job and the redraft loop.
+- **`max_tokens` budgets** (1200–1800) cap output per call.
+- **Boilerplate stripping** (`trafilatura`) and **content-hash dedup** before embedding.
+- **Reusable sender ICP** amortizes Mode 1 across many Mode 2 runs.
+- **Compact numbered snippet format** minimizes scaffolding tokens while preserving
+  citability.
+- **Per-step token metering** makes all of the above measurable.
 
 ---
 
 ## 6. Quality & safety of outputs
 
-- **No placeholders.** The email prompt hard-bans `[First Name]`-style tokens; the model
-  greets with "Hi there," and uses the real target name.
-- **Mandatory claim mapping.** Every factual statement about the target must map to
-  evidence; unsupported sentences are instructed to be removed, and the UI surfaces any
-  unresolved claim with a ⚠ marker.
-- **Honest scoring.** The fit prompt explicitly instructs low scores for poor fits and a
-  `confidence` field for thin evidence — the tool is built to say "weak fit," not to
-  flatter.
-- **Two genuinely different angles.** Pain-led vs trigger-led are defined structurally
-  (problem ownership vs recent event), not just stylistically.
+- **No placeholders.** The email prompt and a deterministic regex both ban `[First Name]`-style
+  tokens; violations trigger a redraft.
+- **Allowed-claims gate + entailment verification.** Every factual claim about the target must
+  be whitelisted *and* verified against its cited snippet; unsupported claims trigger a redraft
+  and are flagged in the claim map.
+- **Honest scoring.** The fit prompt instructs low scores for poor fits, scores five
+  dimensions (incl. buyer/persona fit), and the sender step emits a `confidence` field for thin
+  evidence.
+- **Two genuinely different angles.** Pain-led (a problem the persona owns) vs trigger-led (a
+  recent event) are defined structurally and seeded by the strategist, not just stylistically.
 
 ---
 
@@ -267,13 +282,13 @@ still possible via `VITE_API_BASE`.
 
 | Limitation | Planned improvement |
 |---|---|
-| Keyword ranking misses semantic matches | Add embedding-based retrieval; keep keyword as a cheap pre-filter |
 | No headless rendering for JS-heavy sites | Optional Playwright fallback when extracted text is thin |
-| JSON parsing is best-effort | Move to Anthropic **tool/structured output** for guaranteed schemas |
-| No automated eval of email quality | Add an LLM-as-judge rubric + regression set of sender/target pairs |
-| Signals not cross-verified | Add a verification pass that confirms each signal against a second source |
-| Synchronous, blocking requests | Stream pipeline progress over SSE/WebSocket for true step-by-step UX |
-| No auth / multi-tenant | Add user accounts + per-user data scoping |
+| Embeddings are CPU-bound and add a heavy dep | Optional hosted embeddings, or cache vectors per domain |
+| Single corrective redraft round | Make rounds adaptive/configurable; escalate persistent failures |
+| Signals not cross-verified | Confirm each signal against a second independent source |
+| No automated eval of email quality | LLM-as-judge rubric + a regression set of sender/target pairs |
+| Synchronous, blocking requests | Stream real per-step progress over SSE/WebSocket (UI progress is currently time-driven) |
+| No auth / multi-tenant | User accounts + per-user data scoping; SSRF allowlisting for fetched URLs |
 
-These are deliberate scope decisions for a focused, reviewable v1 — each has a clear,
-low-risk upgrade path because of the layered architecture.
+These are deliberate scope decisions for a focused, reviewable build — each has a clear,
+low-risk upgrade path thanks to the layered architecture.

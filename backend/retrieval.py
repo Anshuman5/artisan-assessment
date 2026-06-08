@@ -15,8 +15,48 @@ from dataclasses import dataclass, field, asdict
 from urllib.parse import urljoin, urlparse
 
 import httpx
+import numpy as np
 import trafilatura
 import tldextract
+
+# ---------------------------------------------------------------------------
+# Embeddings (local, no API key). Loaded lazily so importing this module is cheap
+# and so the app still runs (falling back to keyword ranking) if the model or its
+# weights are unavailable.
+# ---------------------------------------------------------------------------
+EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+_embedder = None
+_embedder_failed = False
+
+
+def _get_embedder():
+    global _embedder, _embedder_failed
+    if _embedder is not None or _embedder_failed:
+        return _embedder
+    try:
+        from fastembed import TextEmbedding
+        _embedder = TextEmbedding(EMBED_MODEL_NAME)
+    except Exception:
+        _embedder_failed = True
+        _embedder = None
+    return _embedder
+
+
+def embed_texts(texts: list[str]) -> "np.ndarray | None":
+    """Return an (N, dim) L2-normalized matrix, or None if embeddings are unavailable."""
+    texts = [t or "" for t in texts]
+    if not texts:
+        return None
+    emb = _get_embedder()
+    if emb is None:
+        return None
+    try:
+        mat = np.array(list(emb.embed(texts)), dtype=np.float32)
+    except Exception:
+        return None
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return mat / norms
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -65,6 +105,7 @@ class Snippet:
     text: str
     source_type: str  # "page" | "search"
     page_kind: str = "other"  # about/product/pricing/customers/blog/search...
+    vec: "np.ndarray | None" = field(default=None, repr=False)
 
     def to_public(self) -> dict:
         return {
@@ -86,8 +127,12 @@ def _clean_text(t: str) -> str:
     return t
 
 
-def _chunk(text: str, max_chars: int = 480) -> list[str]:
-    """Split extracted page text into compact, paragraph-ish chunks."""
+def _chunk(text: str, max_chars: int = 700) -> list[str]:
+    """Split extracted page text into compact, paragraph-ish chunks (~150-180 tokens).
+
+    Kept deliberately small so retrieval feeds the model a handful of tight,
+    on-topic snippets rather than whole pages — the core token-optimization move.
+    """
     text = (text or "").strip()
     if not text:
         return []
@@ -168,6 +213,7 @@ class EvidenceStore:
 
     def __init__(self):
         self.snippets: dict[str, Snippet] = {}
+        self._embedded: bool = False
 
     def add(self, url: str, title: str, text: str, source_type: str, page_kind: str = "other") -> Snippet | None:
         text = _clean_text(text)
@@ -184,8 +230,65 @@ class EvidenceStore:
     def all(self) -> list[Snippet]:
         return list(self.snippets.values())
 
+    # -- Embedding lifecycle -------------------------------------------------
+
+    def finalize(self, dedupe_threshold: float = 0.93) -> None:
+        """Embed all snippets once (batched) and drop near-duplicate chunks.
+
+        Near-dup removal collapses repeated boilerplate (shared nav/footer/CTA
+        text that survives per-page hashing) so we don't spend tokens on it and
+        don't over-count the same 'evidence'. No-op if embeddings are unavailable.
+        """
+        items = list(self.snippets.values())
+        if not items:
+            return
+        mat = embed_texts([s.text for s in items])
+        if mat is None:
+            self._embedded = False
+            return
+        for s, v in zip(items, mat):
+            s.vec = v
+        self._embedded = True
+
+        # Greedy near-duplicate pruning: keep the first occurrence, drop any later
+        # snippet whose cosine similarity to a kept one exceeds the threshold.
+        kept_idx: list[int] = []
+        kept_vecs: list[np.ndarray] = []
+        drop_ids: list[str] = []
+        for i, s in enumerate(items):
+            v = s.vec
+            if kept_vecs:
+                sims = np.array(kept_vecs) @ v
+                if float(sims.max()) >= dedupe_threshold:
+                    drop_ids.append(s.id)
+                    continue
+            kept_idx.append(i)
+            kept_vecs.append(v)
+        for sid in drop_ids:
+            self.snippets.pop(sid, None)
+
+    def semantic_search(self, query: str, limit: int = 6,
+                        prefer_kinds: list[str] | None = None) -> list[Snippet]:
+        """Embedding (cosine) retrieval, with a keyword fallback if unavailable."""
+        items = list(self.snippets.values())
+        if not items:
+            return []
+        prefer_kinds = prefer_kinds or []
+        qmat = embed_texts([query])
+        if qmat is None or not all(getattr(s, "vec", None) is not None for s in items):
+            return self.search(re.findall(r"[a-z0-9]+", query.lower()), limit, prefer_kinds)
+        q = qmat[0]
+        scored = []
+        for s in items:
+            score = float(s.vec @ q)
+            if s.page_kind in prefer_kinds:
+                score += 0.05
+            scored.append((score, s))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [s for _, s in scored[:limit]]
+
     def search(self, query_terms: list[str], limit: int = 8, prefer_kinds: list[str] | None = None) -> list[Snippet]:
-        """Lightweight keyword ranking to pull the most relevant snippets for the LLM."""
+        """Lightweight keyword ranking (fallback when embeddings are unavailable)."""
         terms = [t.lower() for t in query_terms if t]
         prefer_kinds = prefer_kinds or []
         scored = []
@@ -251,4 +354,8 @@ async def crawl_company_site(url: str, max_pages: int = 7) -> tuple[EvidenceStor
             if r:
                 meta["pages_fetched"].append(r)
 
+    # Embed once and prune near-duplicate boilerplate before any retrieval.
+    store.finalize()
+    meta["embedded"] = store._embedded
+    meta["snippet_count"] = len(store.snippets)
     return store, meta
